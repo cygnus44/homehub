@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HomeHub</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0B0F1A; font-family: 'Inter', system-ui, sans-serif; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #111827; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ── PIN ─────────────────────────────────────────────────────────────────
+    const PIN_KEY = 'homehub_unlocked';
+    const CORRECT_PIN = '1234';  // ← Change this to your main unlock PIN
+    const ADMIN_PIN   = '9999';  // ← Change this to your App Manager admin PIN
+
+    // ── Persistence ─────────────────────────────────────────────────────────
+    const loadKeys  = () => { try { return JSON.parse(localStorage.getItem('homehub_keys')  || '{}'); } catch { return {}; } };
+    const saveKeys  = k  => localStorage.setItem('homehub_keys',  JSON.stringify(k));
+    const loadApps  = () => { try { const a = JSON.parse(localStorage.getItem('homehub_apps')); return Array.isArray(a) && a.length ? a : null; } catch { return null; } };
+    const saveApps  = a  => localStorage.setItem('homehub_apps',  JSON.stringify(a));
+
+    // ── Hydrawise API ────────────────────────────────────────────────────────
+    const PROXY_BASE = 'https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev'; // ← paste your Cloudflare Worker URL here
+
+    async function fetchHydrawise(apiKey) {
+      const [infoRes, schedRes] = await Promise.all([
+        fetch(`${PROXY_BASE}/hydrawise?api_key=${apiKey}&endpoint=customerdetails`),
+        fetch(`${PROXY_BASE}/hydrawise?api_key=${apiKey}&endpoint=statusschedule`),
+      ]);
+      if (!infoRes.ok || !schedRes.ok) throw new Error('API error');
+      return { info: await infoRes.json(), sched: await schedRes.json() };
+    }
+
+    function parseHydrawise({ sched }) {
+      const zones = sched.relays || [];
+      const running = zones.filter(z => z.timestr === 'Currently Running');
+      const rainDelay = sched.simpleStatus === 'watering_suspended';
+      let nextRun = 'Not scheduled', soonest = Infinity;
+      zones.forEach(z => { if (z.time && z.time > 0 && z.time < soonest) { soonest = z.time; nextRun = new Date(Date.now() + z.time * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }); } });
+      return {
+        zoneCount: zones.length,
+        zones: zones.map(z => ({ name: z.name, running: z.timestr === 'Currently Running', nextRun: z.timestr || 'Not scheduled' })),
+        running: running.length > 0, runningZone: running[0]?.name || null,
+        nextRun, rainDelay,
+        status: running.length > 0 ? 'Watering' : rainDelay ? 'Rain delay' : 'Idle',
+      };
+    }
+
+    // ── Default apps ─────────────────────────────────────────────────────────
+    const DEFAULT_APPS = [
+      { id:'amcrest',    name:'Amcrest',     category:'Security',   icon:'📷', color:'#F59E0B', bg:'#1C1208', description:'Cameras & NVR',        url:'https://amcrest.com',        status:'online', statusLabel:'4 cameras active', apiNote:'Enter your NVR local IP address (e.g. 192.168.1.100). Find it in your router device list.', quickStats:[{label:'Cameras',value:'4'},{label:'Recording',value:'On'},{label:'Motion',value:'None'}], visible:true },
+      { id:'nest',       name:'Google Home', category:'Security',   icon:'🔔', color:'#60A5FA', bg:'#0A1628', description:'Nest Doorbell',         url:'https://home.google.com',    status:'online', statusLabel:'Doorbell online',  apiNote:'Enter your OAuth 2.0 token from console.nest.google.com (Google Device Access Console).', quickStats:[{label:'Status',value:'Live'},{label:'Motion',value:'None'},{label:'Battery',value:'100%'}], visible:true },
+      { id:'econet',     name:'EcoNet',      category:'Climate',    icon:'💧', color:'#34D399', bg:'#071A12', description:'Water heater',          url:'https://econetcontrols.com', status:'online', statusLabel:'120°F — Standby',  apiNote:'Enter your API key from econetcontrols.com → Account Settings → API.', quickStats:[{label:'Temp',value:'120°F'},{label:'Mode',value:'Eco'},{label:'Status',value:'Ready'}], visible:true },
+      { id:'emporia',    name:'Emporia',     category:'Energy',     icon:'⚡', color:'#A78BFA', bg:'#100820', description:'Energy monitoring',      url:'https://emporiaenergy.com',  status:'online', statusLabel:'3.2 kW in use',    apiNote:'Enter your Vue device local IP address. Requires home network or VPN for remote access.', quickStats:[{label:'Now',value:'3.2 kW'},{label:'Today',value:'18 kWh'},{label:'Cost',value:'$2.40'}], visible:true },
+      { id:'simplisafe', name:'SimpliSafe',  category:'Security',   icon:'🔒', color:'#F87171', bg:'#1A0808', description:'Alarm system',          url:'https://simplisafe.com',     status:'armed',  statusLabel:'Armed — Away',     apiNote:'Enter your SimpliSafe API token from your account settings at simplisafe.com.', quickStats:[{label:'Mode',value:'Away'},{label:'Sensors',value:'12 OK'},{label:'Alarm',value:'Off'}], visible:true },
+      { id:'hydrawise',  name:'Hydrawise',   category:'Irrigation', icon:'🌿', color:'#2DD4BF', bg:'#041A18', description:'Smart irrigation',       url:'https://hydrawise.com',      status:'idle',   statusLabel:'Loading...',       apiNote:'Enter your API key from app.hydrawise.com → Account → API. Live zone data loads automatically.', quickStats:[{label:'Zones',value:'—'},{label:'Next Run',value:'—'},{label:'Status',value:'—'}], visible:true },
+    ];
+
+    const CAMERAS = [
+      { id:'c1', name:'Front Door',  source:'Amcrest',     icon:'📷', location:'Exterior', status:'online', motion:false, color:'#F59E0B' },
+      { id:'c2', name:'Backyard',    source:'Amcrest',     icon:'📷', location:'Exterior', status:'online', motion:false, color:'#F59E0B' },
+      { id:'c3', name:'Garage',      source:'Amcrest',     icon:'📷', location:'Exterior', status:'online', motion:true,  color:'#F59E0B' },
+      { id:'c4', name:'Living Room', source:'Amcrest',     icon:'📷', location:'Interior', status:'online', motion:false, color:'#F59E0B' },
+      { id:'c5', name:'Doorbell',    source:'Google Home', icon:'🔔', location:'Exterior', status:'online', motion:false, color:'#60A5FA' },
+    ];
+
+    const INITIAL_ALERTS = [
+      { id:1, type:'warning', system:'Hydrawise',   icon:'🌿', message:'Zone 3 scheduled to run in 30 minutes',    time:'5 min ago',  read:false },
+      { id:2, type:'success', system:'SimpliSafe',  icon:'🔒', message:'System armed successfully — Away mode',    time:'18 min ago', read:true  },
+      { id:3, type:'warning', system:'Amcrest',     icon:'📷', message:'Motion detected — Garage camera',          time:'34 min ago', read:true  },
+      { id:4, type:'info',    system:'Google Home', icon:'🔔', message:'Doorbell pressed — visitor at front door', time:'1 hr ago',   read:true  },
+    ];
+
+    const CATEGORY_OPTIONS = ['Security','Climate','Energy','Irrigation','Entertainment','Lighting','Other'];
+    const COLOR_OPTIONS = ['#F59E0B','#60A5FA','#34D399','#A78BFA','#F87171','#2DD4BF','#FB923C','#E879F9','#4ADE80','#F472B6'];
+    const ICON_OPTIONS  = ['📷','🔔','💧','⚡','🔒','🌿','💡','🎵','🌡️','🚗','📱','🖥️','🔑','🌐','📡','🏠','🔧','🎮','🌊','🔥'];
+
+    const sdot = s => ({ online:'#34D399', armed:'#F59E0B', idle:'#60A5FA', watering:'#2DD4BF', offline:'#6B7280' }[s] || '#6B7280');
+    const acol = t => ({ warning:'#F59E0B', info:'#60A5FA', success:'#34D399', error:'#F87171' }[t] || '#9CA3AF');
+    const uid  = () => Math.random().toString(36).slice(2,9);
+    const darken = hex => hex + '18';
+
+    // ── NavTab ───────────────────────────────────────────────────────────────
+    function NavTab({ label, active, badge, onClick }) {
+      return (
+        <button onClick={onClick} style={{ padding:'8px 16px', border:'none', cursor:'pointer', background:active?'#3B82F620':'transparent', color:active?'#60A5FA':'#6B7280', fontWeight:active?700:500, fontSize:13, borderBottom:active?'2px solid #3B82F6':'2px solid transparent', position:'relative', transition:'all 0.15s', whiteSpace:'nowrap' }}>
+          {label}
+          {badge > 0 && <span style={{ position:'absolute', top:2, right:2, background:'#F87171', color:'#fff', borderRadius:'50%', width:16, height:16, fontSize:9, fontWeight:800, display:'flex', alignItems:'center', justifyContent:'center' }}>{badge}</span>}
+        </button>
+      );
+    }
+
+    // ── AppCard ──────────────────────────────────────────────────────────────
+    function AppCard({ app, onClick }) {
+      return (
+        <div onClick={() => onClick(app)} style={{ background:`linear-gradient(135deg,${app.bg||'#111827'} 0%,#111827 100%)`, border:`1px solid ${app.color}22`, borderRadius:16, padding:20, cursor:'pointer', transition:'all 0.2s', position:'relative', overflow:'hidden' }}
+          onMouseEnter={e=>{ e.currentTarget.style.border=`1px solid ${app.color}55`; e.currentTarget.style.transform='translateY(-2px)'; e.currentTarget.style.boxShadow=`0 8px 28px ${app.color}18`; }}
+          onMouseLeave={e=>{ e.currentTarget.style.border=`1px solid ${app.color}22`; e.currentTarget.style.transform='translateY(0)'; e.currentTarget.style.boxShadow='none'; }}
+        >
+          <div style={{ position:'absolute', top:-40, right:-40, width:100, height:100, borderRadius:'50%', background:`radial-gradient(circle,${app.color}14 0%,transparent 70%)`, pointerEvents:'none' }} />
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+              <span style={{ fontSize:22 }}>{app.icon}</span>
+              <div>
+                <div style={{ color:'#F9FAFB', fontWeight:700, fontSize:14 }}>{app.name}</div>
+                <div style={{ color:'#6B7280', fontSize:10, textTransform:'uppercase', letterSpacing:'0.08em' }}>{app.category}</div>
+              </div>
+            </div>
+            <div style={{ width:7, height:7, borderRadius:'50%', background:sdot(app.status), boxShadow:`0 0 6px ${sdot(app.status)}` }} />
+          </div>
+          <div style={{ color:app.color, fontSize:12, fontWeight:600, padding:'3px 8px', background:`${app.color}14`, borderRadius:5, display:'inline-block', marginBottom:12 }}>{app.statusLabel}</div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:6, marginBottom:12 }}>
+            {(app.quickStats||[]).map(s => (
+              <div key={s.label} style={{ background:'#FFFFFF08', borderRadius:7, padding:'7px 4px', textAlign:'center' }}>
+                <div style={{ color:'#F9FAFB', fontWeight:700, fontSize:12 }}>{s.value}</div>
+                <div style={{ color:'#6B7280', fontSize:9, textTransform:'uppercase', letterSpacing:'0.05em' }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:6 }}>
+            <a href={app.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{ flex:1, textAlign:'center', padding:'7px', borderRadius:7, background:`${app.color}20`, color:app.color, fontSize:11, fontWeight:600, textDecoration:'none', border:`1px solid ${app.color}33` }}>Open ↗</a>
+            <button onClick={e=>{ e.stopPropagation(); onClick(app); }} style={{ flex:1, padding:'7px', borderRadius:7, background:'#FFFFFF08', color:'#9CA3AF', fontSize:11, fontWeight:600, border:'1px solid #FFFFFF12', cursor:'pointer' }}>Details</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── DetailModal ──────────────────────────────────────────────────────────
+    function DetailModal({ app, onClose, apiKeys, onKeySave, hwLive, hwError, onHwRefresh, hwLoading }) {
+      const [apiKey, setApiKey] = useState(apiKeys[app?.id] || '');
+      const [connected, setConnected] = useState(!!apiKeys[app?.id]);
+      if (!app) return null;
+      const isHW = app.id === 'hydrawise';
+
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'#00000088', backdropFilter:'blur(6px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, padding:20 }}>
+          <div onClick={e=>e.stopPropagation()} style={{ background:'#111827', border:`1px solid ${app.color}44`, borderRadius:20, padding:28, maxWidth:520, width:'100%', boxShadow:`0 24px 64px ${app.color}20`, maxHeight:'90vh', overflowY:'auto' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:18 }}>
+              <div style={{ display:'flex', gap:12, alignItems:'center' }}>
+                <span style={{ fontSize:30 }}>{app.icon}</span>
+                <div>
+                  <div style={{ color:'#F9FAFB', fontSize:18, fontWeight:800 }}>{app.name}</div>
+                  <div style={{ color:'#6B7280', fontSize:12 }}>{app.description}</div>
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background:'none', border:'none', color:'#6B7280', fontSize:20, cursor:'pointer' }}>✕</button>
+            </div>
+            <div style={{ background:`${app.color}10`, border:`1px solid ${app.color}22`, borderRadius:10, padding:'10px 14px', marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
+              <div style={{ width:7, height:7, borderRadius:'50%', background:sdot(app.status), boxShadow:`0 0 6px ${sdot(app.status)}` }} />
+              <span style={{ color:app.color, fontWeight:600, fontSize:13 }}>{app.statusLabel}</span>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:8, marginBottom:18 }}>
+              {(app.quickStats||[]).map(s => (
+                <div key={s.label} style={{ background:'#FFFFFF06', border:'1px solid #FFFFFF10', borderRadius:10, padding:12, textAlign:'center' }}>
+                  <div style={{ color:'#F9FAFB', fontWeight:800, fontSize:16 }}>{s.value}</div>
+                  <div style={{ color:'#6B7280', fontSize:10, textTransform:'uppercase', letterSpacing:'0.06em' }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* API panel */}
+            <div style={{ background:'#0B0F1A', border:'1px solid #FFFFFF10', borderRadius:10, padding:14, marginBottom:18 }}>
+              <div style={{ color:'#9CA3AF', fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:8 }}>API Connection</div>
+              <div style={{ color:'#6B7280', fontSize:12, marginBottom:10 }}>{app.apiNote || 'Enter your API key or connection details below.'}</div>
+
+              {isHW && connected && hwLive ? (
+                <div>
+                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+                    <div style={{ width:7, height:7, borderRadius:'50%', background: hwError?'#F87171':'#34D399', boxShadow:`0 0 6px ${hwError?'#F87171':'#34D399'}` }} />
+                    <span style={{ color: hwError?'#F87171':'#34D399', fontSize:12, fontWeight:600 }}>{hwError ? 'Connection error' : 'Live data active'}</span>
+                    <button onClick={()=>{ setConnected(false); setApiKey(''); onKeySave(app.id,''); }} style={{ marginLeft:'auto', background:'none', border:'none', color:'#6B7280', fontSize:11, cursor:'pointer' }}>Disconnect</button>
+                    <button onClick={onHwRefresh} disabled={hwLoading} style={{ background:'#FFFFFF0A', border:'1px solid #FFFFFF14', borderRadius:6, color:'#9CA3AF', fontSize:11, padding:'3px 8px', cursor:'pointer' }}>{hwLoading?'...':'↻'}</button>
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:160, overflowY:'auto', marginBottom:10 }}>
+                    {hwLive.zones.map((z,i) => (
+                      <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', background:z.running?'#2DD4BF14':'#FFFFFF06', border:`1px solid ${z.running?'#2DD4BF33':'#FFFFFF0A'}`, borderRadius:7, padding:'6px 10px' }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+                          <div style={{ width:6, height:6, borderRadius:'50%', background:z.running?'#2DD4BF':'#374151' }} />
+                          <span style={{ color:'#F9FAFB', fontSize:12 }}>{z.name}</span>
+                        </div>
+                        <span style={{ color:z.running?'#2DD4BF':'#6B7280', fontSize:11 }}>{z.running?'💧 Running':z.nextRun}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : !connected ? (
+                <div style={{ display:'flex', gap:8 }}>
+                  <input value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="API key / token / IP address"
+                    style={{ flex:1, background:'#111827', border:'1px solid #FFFFFF14', borderRadius:7, padding:'8px 10px', color:'#F9FAFB', fontSize:12, outline:'none' }} />
+                  <button onClick={()=>{ if(apiKey.trim()){ setConnected(true); onKeySave(app.id, apiKey.trim()); }}} style={{ padding:'8px 14px', borderRadius:7, background:app.color, color:'#000', fontWeight:700, fontSize:12, border:'none', cursor:'pointer' }}>Connect</button>
+                </div>
+              ) : (
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <div style={{ width:7, height:7, borderRadius:'50%', background:'#34D399', boxShadow:'0 0 6px #34D399' }} />
+                  <span style={{ color:'#34D399', fontSize:12, fontWeight:600 }}>Connected — live data enabled</span>
+                  <button onClick={()=>{ setConnected(false); setApiKey(''); onKeySave(app.id,''); }} style={{ marginLeft:'auto', background:'none', border:'none', color:'#6B7280', fontSize:11, cursor:'pointer' }}>Disconnect</button>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display:'flex', gap:8 }}>
+              <a href={app.url} target="_blank" rel="noopener noreferrer" style={{ flex:1, textAlign:'center', padding:12, borderRadius:10, background:app.color, color:'#000', fontWeight:700, fontSize:13, textDecoration:'none' }}>Open {app.name} ↗</a>
+              <button onClick={onClose} style={{ padding:'12px 18px', borderRadius:10, background:'#FFFFFF0A', color:'#9CA3AF', fontWeight:600, fontSize:13, border:'1px solid #FFFFFF12', cursor:'pointer' }}>Close</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── App Manager ──────────────────────────────────────────────────────────
+    function AppManager({ apps, onAppsChange, onClose }) {
+      const [view, setView]   = useState('list'); // 'list' | 'add' | 'edit'
+      const [editing, setEditing] = useState(null);
+      const BLANK = { id:'', name:'', category:'Security', icon:'📱', color:'#60A5FA', bg:'#0A1628', description:'', url:'https://', status:'online', statusLabel:'Online', apiNote:'', quickStats:[{label:'Status',value:'—'},{label:'Type',value:'—'},{label:'Link',value:'—'}], visible:true };
+      const [form, setForm]   = useState(BLANK);
+
+      const openAdd  = () => { setForm({...BLANK, id:uid()}); setView('add'); };
+      const openEdit = app => { setForm({...app}); setEditing(app.id); setView('edit'); };
+
+      const saveForm = () => {
+        if (!form.name.trim() || !form.url.trim()) return;
+        const updated = view==='add'
+          ? [...apps, {...form}]
+          : apps.map(a => a.id===editing ? {...form} : a);
+        onAppsChange(updated);
+        setView('list');
+      };
+
+      const toggleVisible = id => onAppsChange(apps.map(a => a.id===id ? {...a, visible:!a.visible} : a));
+      const removeApp     = id => onAppsChange(apps.filter(a => a.id!==id));
+      const moveApp       = (id, dir) => {
+        const i = apps.findIndex(a=>a.id===id);
+        if ((dir===-1&&i===0)||(dir===1&&i===apps.length-1)) return;
+        const next = [...apps]; [next[i],next[i+dir]] = [next[i+dir],next[i]]; onAppsChange(next);
+      };
+      const resetApps = () => { onAppsChange(DEFAULT_APPS); setView('list'); };
+
+      const F = ({label, field, type='text', opts}) => (
+        <div style={{ marginBottom:12 }}>
+          <div style={{ color:'#9CA3AF', fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:5 }}>{label}</div>
+          {opts ? (
+            <select value={form[field]} onChange={e=>setForm(f=>({...f,[field]:e.target.value}))}
+              style={{ width:'100%', background:'#0B0F1A', border:'1px solid #FFFFFF14', borderRadius:7, padding:'8px 10px', color:'#F9FAFB', fontSize:13, outline:'none' }}>
+              {opts.map(o=><option key={o} value={o}>{o}</option>)}
+            </select>
+          ) : (
+            <input type={type} value={form[field]} onChange={e=>setForm(f=>({...f,[field]:e.target.value}))}
+              style={{ width:'100%', background:'#0B0F1A', border:'1px solid #FFFFFF14', borderRadius:7, padding:'8px 10px', color:'#F9FAFB', fontSize:13, outline:'none' }} />
+          )}
+        </div>
+      );
+
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'#00000088', backdropFilter:'blur(6px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:300, padding:20 }}>
+          <div onClick={e=>e.stopPropagation()} style={{ background:'#111827', border:'1px solid #3B82F633', borderRadius:20, padding:24, maxWidth:560, width:'100%', maxHeight:'90vh', overflowY:'auto', boxShadow:'0 24px 64px #3B82F620' }}>
+
+            {/* Header */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:20 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                {view!=='list' && <button onClick={()=>setView('list')} style={{ background:'none', border:'none', color:'#60A5FA', fontSize:18, cursor:'pointer' }}>←</button>}
+                <div style={{ color:'#F9FAFB', fontWeight:800, fontSize:16 }}>
+                  {view==='list' ? '⚙️ App Manager' : view==='add' ? '➕ Add App' : '✏️ Edit App'}
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background:'none', border:'none', color:'#6B7280', fontSize:20, cursor:'pointer' }}>✕</button>
+            </div>
+
+            {/* List view */}
+            {view==='list' && (
+              <>
+                <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+                  <button onClick={openAdd} style={{ flex:1, padding:'10px', borderRadius:10, background:'linear-gradient(135deg,#3B82F6,#8B5CF6)', color:'#fff', fontWeight:700, fontSize:13, border:'none', cursor:'pointer' }}>+ Add New App</button>
+                  <button onClick={resetApps} style={{ padding:'10px 14px', borderRadius:10, background:'#FFFFFF08', color:'#6B7280', fontSize:12, border:'1px solid #FFFFFF12', cursor:'pointer' }}>Reset to Default</button>
+                </div>
+                <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                  {apps.map((app,i) => (
+                    <div key={app.id} style={{ display:'flex', alignItems:'center', gap:10, background:'#0B0F1A', border:`1px solid ${app.color}22`, borderRadius:12, padding:'10px 14px' }}>
+                      <span style={{ fontSize:20 }}>{app.icon}</span>
+                      <div style={{ flex:1 }}>
+                        <div style={{ color: app.visible?'#F9FAFB':'#4B5563', fontWeight:600, fontSize:13 }}>{app.name}</div>
+                        <div style={{ color:'#6B7280', fontSize:11 }}>{app.category} · {app.url}</div>
+                      </div>
+                      {/* Controls */}
+                      <div style={{ display:'flex', gap:4 }}>
+                        <button onClick={()=>moveApp(app.id,-1)} disabled={i===0} style={{ background:'#FFFFFF08', border:'none', borderRadius:6, color: i===0?'#374151':'#9CA3AF', fontSize:12, width:28, height:28, cursor: i===0?'default':'pointer' }}>↑</button>
+                        <button onClick={()=>moveApp(app.id,1)} disabled={i===apps.length-1} style={{ background:'#FFFFFF08', border:'none', borderRadius:6, color: i===apps.length-1?'#374151':'#9CA3AF', fontSize:12, width:28, height:28, cursor: i===apps.length-1?'default':'pointer' }}>↓</button>
+                        <button onClick={()=>toggleVisible(app.id)} style={{ background: app.visible?'#34D39918':'#FFFFFF08', border:`1px solid ${app.visible?'#34D39930':'#FFFFFF12'}`, borderRadius:6, color: app.visible?'#34D399':'#4B5563', fontSize:10, padding:'0 6px', height:28, cursor:'pointer' }}>{app.visible?'Shown':'Hidden'}</button>
+                        <button onClick={()=>openEdit(app)} style={{ background:'#3B82F618', border:'1px solid #3B82F630', borderRadius:6, color:'#60A5FA', fontSize:11, padding:'0 8px', height:28, cursor:'pointer' }}>Edit</button>
+                        <button onClick={()=>removeApp(app.id)} style={{ background:'#F8717118', border:'1px solid #F8717130', borderRadius:6, color:'#F87171', fontSize:11, padding:'0 8px', height:28, cursor:'pointer' }}>✕</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Add / Edit form */}
+            {(view==='add'||view==='edit') && (
+              <div>
+                {/* Icon picker */}
+                <div style={{ marginBottom:12 }}>
+                  <div style={{ color:'#9CA3AF', fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:5 }}>Icon</div>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                    {ICON_OPTIONS.map(ic => (
+                      <button key={ic} onClick={()=>setForm(f=>({...f,icon:ic}))} style={{ width:36, height:36, borderRadius:8, border:`2px solid ${form.icon===ic?'#3B82F6':'#FFFFFF12'}`, background:form.icon===ic?'#3B82F620':'#0B0F1A', fontSize:18, cursor:'pointer' }}>{ic}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <F label="App Name"   field="name" />
+                <F label="URL"        field="url" />
+                <F label="Description" field="description" />
+                <F label="Category"   field="category" opts={CATEGORY_OPTIONS} />
+                <F label="Status Label (shown on card)" field="statusLabel" />
+                <F label="API Note (shown in Details panel)" field="apiNote" />
+
+                {/* Color picker */}
+                <div style={{ marginBottom:16 }}>
+                  <div style={{ color:'#9CA3AF', fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:5 }}>Accent Color</div>
+                  <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                    {COLOR_OPTIONS.map(c => (
+                      <button key={c} onClick={()=>setForm(f=>({...f,color:c}))} style={{ width:32, height:32, borderRadius:'50%', background:c, border:`3px solid ${form.color===c?'#fff':'transparent'}`, cursor:'pointer' }} />
+                    ))}
+                  </div>
+                </div>
+
+                {/* Preview */}
+                <div style={{ marginBottom:16, background:'#0B0F1A', border:`1px solid ${form.color}33`, borderRadius:12, padding:14 }}>
+                  <div style={{ color:'#6B7280', fontSize:11, marginBottom:8 }}>Preview</div>
+                  <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                    <span style={{ fontSize:24 }}>{form.icon}</span>
+                    <div>
+                      <div style={{ color:'#F9FAFB', fontWeight:700, fontSize:14 }}>{form.name||'App Name'}</div>
+                      <div style={{ color:form.color, fontSize:12, fontWeight:600 }}>{form.statusLabel||'Status'}</div>
+                    </div>
+                    <a href={form.url} target="_blank" rel="noopener noreferrer" style={{ marginLeft:'auto', padding:'6px 12px', borderRadius:7, background:`${form.color}20`, color:form.color, fontSize:11, fontWeight:600, textDecoration:'none' }}>Open ↗</a>
+                  </div>
+                </div>
+
+                <div style={{ display:'flex', gap:8 }}>
+                  <button onClick={saveForm} style={{ flex:1, padding:12, borderRadius:10, background:`linear-gradient(135deg,#3B82F6,#8B5CF6)`, color:'#fff', fontWeight:700, fontSize:13, border:'none', cursor:'pointer' }}>
+                    {view==='add' ? 'Add App' : 'Save Changes'}
+                  </button>
+                  <button onClick={()=>setView('list')} style={{ padding:'12px 18px', borderRadius:10, background:'#FFFFFF0A', color:'#9CA3AF', fontWeight:600, fontSize:13, border:'1px solid #FFFFFF12', cursor:'pointer' }}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── CameraTile ───────────────────────────────────────────────────────────
+    function CameraTile({ cam, expanded, onToggle }) {
+      const [time, setTime] = useState(new Date());
+      useEffect(() => { const t = setInterval(()=>setTime(new Date()),1000); return ()=>clearInterval(t); }, []);
+      const ts = time.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      return (
+        <div onClick={onToggle} style={{ background:'#0B0F1A', border:`1px solid ${cam.motion?'#F59E0B55':cam.color+'22'}`, borderRadius:12, overflow:'hidden', cursor:'pointer', transition:'all 0.2s', gridColumn:expanded?'span 2':'span 1' }}
+          onMouseEnter={e=>{e.currentTarget.style.border=`1px solid ${cam.color}55`;}}
+          onMouseLeave={e=>{e.currentTarget.style.border=`1px solid ${cam.motion?'#F59E0B55':cam.color+'22'}`;}}
+        >
+          <div style={{ width:'100%', aspectRatio:'16/9', background:'linear-gradient(135deg,#0d1117,#111827,#0d1117)', position:'relative', display:'flex', alignItems:'center', justifyContent:'center', overflow:'hidden' }}>
+            <div style={{ position:'absolute', inset:0, background:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px)', pointerEvents:'none' }} />
+            {[['8px',null,'8px',null],['8px',null,null,'8px'],[null,'8px','8px',null],[null,'8px',null,'8px']].map(([t,b,l,r],i)=>(
+              <div key={i} style={{ position:'absolute', top:t, bottom:b, left:l, right:r, width:16, height:16, borderTop:t?`2px solid ${cam.color}88`:'none', borderBottom:b?`2px solid ${cam.color}88`:'none', borderLeft:l?`2px solid ${cam.color}88`:'none', borderRight:r?`2px solid ${cam.color}88`:'none' }} />
+            ))}
+            <div style={{ textAlign:'center', opacity:0.25 }}><div style={{ fontSize:expanded?48:32 }}>{cam.icon}</div><div style={{ color:'#6B7280', fontSize:10, marginTop:4 }}>LIVE</div></div>
+            {cam.motion && <div style={{ position:'absolute', inset:0, border:'2px solid #F59E0B', borderRadius:12, pointerEvents:'none' }}><div style={{ position:'absolute', top:8, left:8, background:'#F59E0B', color:'#000', fontSize:10, fontWeight:800, padding:'2px 7px', borderRadius:4 }}>⚠ MOTION</div></div>}
+            <div style={{ position:'absolute', top:8, right:8, display:'flex', alignItems:'center', gap:4 }}><div style={{ width:6, height:6, borderRadius:'50%', background:'#F87171', boxShadow:'0 0 6px #F87171' }} /><span style={{ color:'#F87171', fontSize:9, fontWeight:700 }}>REC</span></div>
+            <div style={{ position:'absolute', bottom:8, left:8, color:cam.color, fontSize:10, fontWeight:600, fontFamily:'monospace' }}>{ts}</div>
+            <div style={{ position:'absolute', bottom:8, right:8, background:'#00000066', color:'#9CA3AF', fontSize:9, padding:'2px 6px', borderRadius:4 }}>{cam.source}</div>
+          </div>
+          <div style={{ padding:'8px 12px', display:'flex', alignItems:'center', justifyContent:'space-between', background:'#111827' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+              <div style={{ width:6, height:6, borderRadius:'50%', background:sdot(cam.status) }} />
+              <span style={{ color:'#F9FAFB', fontSize:12, fontWeight:700 }}>{cam.name}</span>
+              <span style={{ color:'#4B5563', fontSize:10 }}>{cam.location}</span>
+            </div>
+            <span style={{ color:'#4B5563', fontSize:10 }}>{expanded?'⤡ collapse':'⤢ expand'}</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ── CamerasTab ───────────────────────────────────────────────────────────
+    function CamerasTab() {
+      const [expandedId, setExpandedId] = useState(null);
+      const [filter, setFilter] = useState('All');
+      const mc = CAMERAS.filter(c=>c.motion).length;
+      const filtered = CAMERAS.filter(c => filter==='All'||( filter==='Motion'&&c.motion)||(filter==='Exterior'&&c.location==='Exterior')||(filter==='Interior'&&c.location==='Interior'));
+      return (
+        <div>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16, flexWrap:'wrap', gap:10 }}>
+            <div>
+              <div style={{ color:'#F9FAFB', fontWeight:700, fontSize:16 }}>Camera View {mc>0&&<span style={{ marginLeft:10, background:'#F59E0B22', color:'#F59E0B', border:'1px solid #F59E0B44', borderRadius:10, padding:'2px 8px', fontSize:11 }}>⚠ {mc} motion</span>}</div>
+              <div style={{ color:'#6B7280', fontSize:12, marginTop:2 }}>{CAMERAS.length} cameras — {CAMERAS.filter(c=>c.status==='online').length} online</div>
+            </div>
+            <div style={{ display:'flex', gap:6 }}>
+              {['All','Motion','Exterior','Interior'].map(f=>(
+                <button key={f} onClick={()=>setFilter(f)} style={{ padding:'6px 12px', borderRadius:7, fontSize:11, fontWeight:600, cursor:'pointer', border:filter===f?'1px solid #F59E0B':'1px solid #FFFFFF12', background:filter===f?'#F59E0B18':'#111827', color:filter===f?'#F59E0B':'#6B7280' }}>{f}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))', gap:12 }}>
+            {filtered.map(cam=><CameraTile key={cam.id} cam={cam} expanded={expandedId===cam.id} onToggle={()=>setExpandedId(expandedId===cam.id?null:cam.id)} />)}
+          </div>
+          <div style={{ marginTop:20, background:'#111827', border:'1px solid #FFFFFF0E', borderRadius:10, padding:'12px 16px', color:'#4B5563', fontSize:12 }}>
+            💡 Live feeds require your Amcrest NVR IP and Nest SDM OAuth token. Connect them via the Details panel. Click any tile to expand.
+          </div>
+        </div>
+      );
+    }
+
+    // ── AlertsTab ────────────────────────────────────────────────────────────
+    function AlertsTab({ alerts, setAlerts }) {
+      const unread = alerts.filter(a=>!a.read).length;
+      return (
+        <div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+            <div style={{ color:'#F9FAFB', fontWeight:700, fontSize:16 }}>Alerts {unread>0&&<span style={{ background:'#F87171', color:'#fff', borderRadius:10, padding:'1px 7px', fontSize:11, marginLeft:6 }}>{unread} new</span>}</div>
+            {unread>0&&<button onClick={()=>setAlerts(alerts.map(a=>({...a,read:true})))} style={{ background:'none', border:'none', color:'#60A5FA', fontSize:12, cursor:'pointer' }}>Mark all read</button>}
+          </div>
+          {alerts.length===0&&<div style={{ color:'#4B5563', textAlign:'center', padding:'40px 0' }}>No alerts — all systems nominal.</div>}
+          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            {alerts.map(alert=>(
+              <div key={alert.id} style={{ background:alert.read?'#111827':`${acol(alert.type)}0A`, border:`1px solid ${alert.read?'#FFFFFF10':acol(alert.type)+'33'}`, borderRadius:12, padding:'14px 16px', display:'flex', alignItems:'flex-start', gap:12 }}>
+                <span style={{ fontSize:20 }}>{alert.icon}</span>
+                <div style={{ flex:1 }}>
+                  <div style={{ display:'flex', justifyContent:'space-between' }}>
+                    <span style={{ color:acol(alert.type), fontSize:11, fontWeight:700, textTransform:'uppercase' }}>{alert.system}</span>
+                    <span style={{ color:'#4B5563', fontSize:11 }}>{alert.time}</span>
+                  </div>
+                  <div style={{ color:alert.read?'#9CA3AF':'#F9FAFB', fontSize:13, marginTop:3 }}>{alert.message}</div>
+                </div>
+                <button onClick={()=>setAlerts(alerts.filter(a=>a.id!==alert.id))} style={{ background:'none', border:'none', color:'#4B5563', cursor:'pointer', fontSize:14 }}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── AIAssistant ──────────────────────────────────────────────────────────
+    function AIAssistant({ hwLive, apps }) {
+      const [messages, setMessages] = useState([{ role:'assistant', content:"Hi! I'm your HomeHub AI. Ask me anything about your home systems." }]);
+      const [input, setInput] = useState('');
+      const [loading, setLoading] = useState(false);
+      const bottomRef = useRef(null);
+      useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:'smooth'}); },[messages]);
+
+      const systemList = apps.filter(a=>a.visible).map(a=>a.name).join(', ');
+      const hwStatus = hwLive ? `Hydrawise: ${hwLive.zoneCount} zones, ${hwLive.status}, next run ${hwLive.nextRun}.` : 'Hydrawise: not connected.';
+      const SYSTEM = `You are HomeHub AI. The user has these smart home systems: ${systemList}. ${hwStatus} Answer concisely and helpfully.`;
+
+      const send = async () => {
+        if (!input.trim()||loading) return;
+        const msg = {role:'user',content:input.trim()};
+        const next = [...messages,msg];
+        setMessages(next); setInput(''); setLoading(true);
+        try {
+          const res = await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1000,system:SYSTEM,messages:next.map(m=>({role:m.role,content:m.content}))})});
+          const data = await res.json();
+          setMessages(prev=>[...prev,{role:'assistant',content:data.content?.map(c=>c.text||'').join('')||"Sorry, couldn't respond."}]);
+        } catch { setMessages(prev=>[...prev,{role:'assistant',content:'Connection error. Please try again.'}]); }
+        setLoading(false);
+      };
+
+      return (
+        <div style={{ display:'flex', flexDirection:'column', height:'calc(100vh - 280px)', minHeight:380 }}>
+          <div style={{ flex:1, overflowY:'auto', display:'flex', flexDirection:'column', gap:12, marginBottom:12, paddingRight:4 }}>
+            {messages.map((m,i)=>(
+              <div key={i} style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start' }}>
+                <div style={{ maxWidth:'78%', padding:'12px 16px', borderRadius:m.role==='user'?'16px 16px 4px 16px':'16px 16px 16px 4px', background:m.role==='user'?'linear-gradient(135deg,#3B82F6,#8B5CF6)':'#1F2937', color:'#F9FAFB', fontSize:14, lineHeight:1.5, border:m.role==='assistant'?'1px solid #FFFFFF10':'none' }}>{m.content}</div>
+              </div>
+            ))}
+            {loading&&<div style={{ display:'flex' }}><div style={{ background:'#1F2937', border:'1px solid #FFFFFF10', borderRadius:'16px 16px 16px 4px', padding:'12px 16px', color:'#6B7280', fontSize:14 }}>Thinking…</div></div>}
+            <div ref={bottomRef} />
+          </div>
+          {messages.length<=1&&(
+            <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:12 }}>
+              {['Any motion detected?','Is the alarm armed?','When does irrigation run next?','What systems are online?'].map(s=>(
+                <button key={s} onClick={()=>setInput(s)} style={{ padding:'6px 12px', borderRadius:20, background:'#1F2937', border:'1px solid #FFFFFF14', color:'#9CA3AF', fontSize:12, cursor:'pointer' }}>{s}</button>
+              ))}
+            </div>
+          )}
+          <div style={{ display:'flex', gap:8 }}>
+            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder="Ask about your home systems..." style={{ flex:1, background:'#1F2937', border:'1px solid #FFFFFF14', borderRadius:12, padding:'12px 16px', color:'#F9FAFB', fontSize:14, outline:'none' }} />
+            <button onClick={send} disabled={loading||!input.trim()} style={{ padding:'12px 20px', borderRadius:12, background:loading||!input.trim()?'#374151':'linear-gradient(135deg,#3B82F6,#8B5CF6)', color:'#fff', fontWeight:700, fontSize:14, border:'none', cursor:loading?'default':'pointer' }}>Send</button>
+          </div>
+        </div>
+      );
+    }
+
+
+    // ── Admin PIN Modal ──────────────────────────────────────────────────────
+    function AdminPinModal({ onSuccess, onClose }) {
+      const [digits, setDigits] = useState('');
+      const [shake,  setShake]  = useState(false);
+      const [error,  setError]  = useState(false);
+
+      const handleDigit = d => {
+        if (digits.length >= 4) return;
+        const next = digits + d;
+        setDigits(next); setError(false);
+        if (next.length === 4) {
+          if (next === ADMIN_PIN) { onSuccess(); }
+          else { setShake(true); setError(true); setTimeout(()=>{ setShake(false); setDigits(''); }, 700); }
+        }
+      };
+
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'#00000099', backdropFilter:'blur(8px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:400, padding:20 }}>
+          <div onClick={e=>e.stopPropagation()} style={{ background:'#111827', border:'1px solid #8B5CF644', borderRadius:20, padding:32, maxWidth:320, width:'100%', boxShadow:'0 24px 64px #8B5CF620', textAlign:'center' }}>
+            <div style={{ width:52, height:52, borderRadius:14, background:'linear-gradient(135deg,#7C3AED,#4F46E5)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:24, margin:'0 auto 16px' }}>🔐</div>
+            <div style={{ color:'#F9FAFB', fontWeight:800, fontSize:18, marginBottom:6 }}>Admin Access</div>
+            <div style={{ color:'#6B7280', fontSize:13, marginBottom:28 }}>Enter your admin PIN to manage apps</div>
+            <div style={{ display:'flex', gap:16, justifyContent:'center', marginBottom:28 }}>
+              {Array.from({length:4},(_,i)=>digits.length>i).map((filled,i)=>(
+                <div key={i} style={{ width:14, height:14, borderRadius:'50%', background:filled?(error?'#F87171':'#8B5CF6'):'transparent', border:`2px solid ${filled?(error?'#F87171':'#8B5CF6'):'#374151'}`, transition:'all 0.15s', boxShadow:filled?`0 0 10px ${error?'#F87171':'#8B5CF6'}88`:'none' }} />
+              ))}
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:16 }}>
+              {['1','2','3','4','5','6','7','8','9','','0','\u232b'].map((d,i)=>(
+                <button key={i} onClick={()=>d==='\u232b'?setDigits(x=>x.slice(0,-1)):d?handleDigit(d):null} disabled={!d}
+                  style={{ height:56, borderRadius:12, border:'1px solid #FFFFFF12', background:d?'#1F2937':'transparent', color:d==='\u232b'?'#9CA3AF':'#F9FAFB', fontSize:d==='\u232b'?18:20, fontWeight:600, cursor:d?'pointer':'default', opacity:d?1:0 }}
+                  onMouseEnter={e=>{if(d)e.currentTarget.style.background='#374151';}}
+                  onMouseLeave={e=>{if(d)e.currentTarget.style.background='#1F2937';}}
+                >{d}</button>
+              ))}
+            </div>
+            {error && <div style={{ color:'#F87171', fontSize:13, marginBottom:10 }}>Incorrect admin PIN</div>}
+            <button onClick={onClose} style={{ background:'none', border:'none', color:'#6B7280', fontSize:13, cursor:'pointer' }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Main App ─────────────────────────────────────────────────────────────
+    function App() {
+      const [tab, setTab]         = useState('dashboard');
+      const [category, setCategory] = useState('All');
+      const [search, setSearch]   = useState('');
+      const [selected, setSelected] = useState(null);
+      const [alerts, setAlerts]   = useState(INITIAL_ALERTS);
+      const [apiKeys, setApiKeys] = useState(loadKeys);
+      const [apps, setApps]       = useState(() => loadApps() || DEFAULT_APPS);
+      const [showManager, setShowManager] = useState(false);
+      const [showAdminPrompt, setShowAdminPrompt] = useState(false);
+
+      // Hydrawise live
+      const [hwLive, setHwLive]     = useState(null);
+      const [hwError, setHwError]   = useState(false);
+      const [hwLoading, setHwLoading] = useState(false);
+
+      const fetchHW = useCallback(async key => {
+        if (!key) return;
+        setHwLoading(true); setHwError(false);
+        try { setHwLive(parseHydrawise(await fetchHydrawise(key))); }
+        catch { setHwError(true); setHwLive(null); }
+        setHwLoading(false);
+      }, []);
+
+      useEffect(() => {
+        if (apiKeys['hydrawise']) fetchHW(apiKeys['hydrawise']);
+        const iv = setInterval(() => { if (apiKeys['hydrawise']) fetchHW(apiKeys['hydrawise']); }, 300000);
+        return () => clearInterval(iv);
+      }, [apiKeys['hydrawise']]);
+
+      const handleKeySave = (id, key) => {
+        const upd = {...apiKeys, [id]: key};
+        if (!key) delete upd[id];
+        setApiKeys(upd); saveKeys(upd);
+        if (id==='hydrawise') { if (key) fetchHW(key); else { setHwLive(null); setHwError(false); } }
+      };
+
+      const handleAppsChange = updated => { setApps(updated); saveApps(updated); };
+
+      // Merge live Hydrawise data
+      const liveApps = apps.map(app => {
+        if (app.id==='hydrawise' && hwLive) return { ...app, status: hwLive.running?'watering':'idle', statusLabel: hwLive.running?`💧 ${hwLive.runningZone} running`:`Next: ${hwLive.nextRun}`, quickStats:[{label:'Zones',value:String(hwLive.zoneCount)},{label:'Status',value:hwLive.status},{label:'Next Run',value:hwLive.nextRun}] };
+        return app;
+      });
+
+      const visibleApps = liveApps.filter(a => a.visible);
+      const allCategories = ['All', ...new Set(visibleApps.map(a=>a.category))];
+      const unread  = alerts.filter(a=>!a.read).length;
+      const motions = CAMERAS.filter(c=>c.motion).length;
+      const filtered = visibleApps.filter(a => (category==='All'||a.category===category) && (a.name.toLowerCase().includes(search.toLowerCase())||a.category.toLowerCase().includes(search.toLowerCase())));
+
+      return (
+        <div style={{ minHeight:'100vh', background:'#0B0F1A', color:'#F9FAFB' }}>
+          {/* Header */}
+          <div style={{ background:'#111827', borderBottom:'1px solid #FFFFFF0E', padding:'14px 24px', display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:10 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+              <div style={{ width:34, height:34, borderRadius:9, background:'linear-gradient(135deg,#3B82F6,#8B5CF6)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:17 }}>🏠</div>
+              <div>
+                <div style={{ fontWeight:800, fontSize:16, letterSpacing:'-0.02em' }}>HomeHub</div>
+                <div style={{ color:'#6B7280', fontSize:10 }}>Unified Control Center</div>
+              </div>
+            </div>
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+              {[{icon:'🔔',val:'Live',color:'#60A5FA'},{icon:'🔒',val:'Armed',color:'#F59E0B'},{icon:'🌿',val:hwLive?hwLive.status:'Idle',color:'#2DD4BF'}].map(p=>(
+                <div key={p.val} style={{ display:'flex', alignItems:'center', gap:4, background:'#FFFFFF08', border:'1px solid #FFFFFF10', borderRadius:20, padding:'4px 10px' }}>
+                  <span style={{ fontSize:12 }}>{p.icon}</span>
+                  <span style={{ color:p.color, fontSize:12, fontWeight:600 }}>{p.val}</span>
+                </div>
+              ))}
+              {motions>0?(
+                <div style={{ display:'flex', alignItems:'center', gap:5, background:'#F59E0B14', border:'1px solid #F59E0B30', borderRadius:20, padding:'4px 10px' }}>
+                  <div style={{ width:6, height:6, borderRadius:'50%', background:'#F59E0B', boxShadow:'0 0 5px #F59E0B' }} />
+                  <span style={{ color:'#F59E0B', fontSize:12, fontWeight:600 }}>⚠ Motion</span>
+                </div>
+              ):(
+                <div style={{ display:'flex', alignItems:'center', gap:5, background:'#34D39914', border:'1px solid #34D39930', borderRadius:20, padding:'4px 10px' }}>
+                  <div style={{ width:6, height:6, borderRadius:'50%', background:'#34D399', boxShadow:'0 0 5px #34D399' }} />
+                  <span style={{ color:'#34D399', fontSize:12, fontWeight:600 }}>All OK</span>
+                </div>
+              )}
+              <button onClick={()=>setShowAdminPrompt(true)} style={{ padding:'5px 12px', borderRadius:20, background:'#FFFFFF08', border:'1px solid #FFFFFF14', color:'#9CA3AF', fontSize:12, cursor:'pointer' }}>⚙️ Apps</button>
+            </div>
+          </div>
+
+          {/* Nav */}
+          <div style={{ background:'#111827', borderBottom:'1px solid #FFFFFF0E', padding:'0 24px', display:'flex', gap:4, overflowX:'auto' }}>
+            <NavTab label="Dashboard"    active={tab==='dashboard'} onClick={()=>setTab('dashboard')} />
+            <NavTab label="📷 Cameras"  active={tab==='cameras'}   badge={motions} onClick={()=>setTab('cameras')} />
+            <NavTab label="AI Assistant" active={tab==='ai'}        onClick={()=>setTab('ai')} />
+            <NavTab label="Alerts"       active={tab==='alerts'}    badge={unread}  onClick={()=>setTab('alerts')} />
+          </div>
+
+          {/* Content */}
+          <div style={{ maxWidth:1100, margin:'0 auto', padding:'24px 20px' }}>
+            {tab==='dashboard' && (
+              <>
+                <div style={{ display:'flex', gap:10, marginBottom:20, flexWrap:'wrap', alignItems:'center' }}>
+                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search systems..." style={{ background:'#111827', border:'1px solid #FFFFFF14', borderRadius:9, padding:'9px 13px', color:'#F9FAFB', fontSize:13, outline:'none', width:180 }} />
+                  <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+                    {allCategories.map(cat=>(
+                      <button key={cat} onClick={()=>setCategory(cat)} style={{ padding:'7px 13px', borderRadius:7, border:category===cat?'1px solid #3B82F6':'1px solid #FFFFFF12', background:category===cat?'#3B82F620':'#111827', color:category===cat?'#60A5FA':'#6B7280', fontSize:12, fontWeight:600, cursor:'pointer' }}>{cat}</button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(290px,1fr))', gap:14 }}>
+                  {filtered.map(app=><AppCard key={app.id} app={app} onClick={setSelected} />)}
+                </div>
+                {filtered.length===0 && (
+                  <div style={{ textAlign:'center', padding:'60px 20px', color:'#4B5563' }}>
+                    <div style={{ fontSize:32, marginBottom:12 }}>📭</div>
+                    No systems found. <button onClick={()=>setShowManager(true)} style={{ background:'none', border:'none', color:'#60A5FA', cursor:'pointer', fontSize:14 }}>Add one in App Manager →</button>
+                  </div>
+                )}
+              </>
+            )}
+            {tab==='cameras'    && <CamerasTab />}
+            {tab==='ai'         && (
+              <div>
+                <div style={{ marginBottom:16 }}>
+                  <div style={{ color:'#F9FAFB', fontWeight:700, fontSize:16, marginBottom:4 }}>AI Home Assistant</div>
+                  <div style={{ color:'#6B7280', fontSize:13 }}>Ask questions about any of your home systems.</div>
+                </div>
+                <AIAssistant hwLive={hwLive} apps={liveApps} />
+              </div>
+            )}
+            {tab==='alerts'     && <AlertsTab alerts={alerts} setAlerts={setAlerts} />}
+          </div>
+
+          {/* Footer */}
+          <div style={{ textAlign:'center', padding:'20px 0 16px', color:'#374151', fontSize:12, borderTop:'1px solid #FFFFFF08', marginTop:20 }}>
+            Designed by <span style={{ color:'#60A5FA', fontWeight:600 }}>DJM Integrations</span>
+          </div>
+
+          {/* Modals */}
+          {showAdminPrompt && <AdminPinModal onSuccess={()=>{ setShowAdminPrompt(false); setShowManager(true); }} onClose={()=>setShowAdminPrompt(false)} />}
+          {showManager && <AppManager apps={apps} onAppsChange={handleAppsChange} onClose={()=>setShowManager(false)} />}
+          <DetailModal app={selected} onClose={()=>setSelected(null)} apiKeys={apiKeys} onKeySave={handleKeySave} hwLive={hwLive} hwError={hwError} onHwRefresh={()=>fetchHW(apiKeys['hydrawise'])} hwLoading={hwLoading} />
+        </div>
+      );
+    }
+
+    // ── PIN Screen ───────────────────────────────────────────────────────────
+    function PinScreen({ onUnlock }) {
+      const [digits, setDigits] = useState('');
+      const [shake,  setShake]  = useState(false);
+      const [error,  setError]  = useState(false);
+
+      const handleDigit = d => {
+        if (digits.length >= 4) return;
+        const next = digits + d;
+        setDigits(next); setError(false);
+        if (next.length === 4) {
+          if (next === CORRECT_PIN) { sessionStorage.setItem(PIN_KEY,'1'); onUnlock(); }
+          else { setShake(true); setError(true); setTimeout(()=>{ setShake(false); setDigits(''); },700); }
+        }
+      };
+
+      return (
+        <div style={{ minHeight:'100vh', background:'#0B0F1A', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center' }}>
+          <div style={{ marginBottom:32, textAlign:'center' }}>
+            <div style={{ width:64, height:64, borderRadius:18, background:'linear-gradient(135deg,#3B82F6,#8B5CF6)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:32, margin:'0 auto 16px' }}>🏠</div>
+            <div style={{ color:'#F9FAFB', fontWeight:800, fontSize:24 }}>HomeHub</div>
+            <div style={{ color:'#6B7280', fontSize:13, marginTop:4 }}>Enter your PIN to continue</div>
+          </div>
+          <div style={{ display:'flex', gap:16, marginBottom:40 }}>
+            {Array.from({length:4},(_,i)=>digits.length>i).map((filled,i)=>(
+              <div key={i} style={{ width:16, height:16, borderRadius:'50%', background:filled?(error?'#F87171':'#3B82F6'):'transparent', border:`2px solid ${filled?(error?'#F87171':'#3B82F6'):'#374151'}`, transition:'all 0.15s', boxShadow:filled?`0 0 10px ${error?'#F87171':'#3B82F6'}88`:'none' }} />
+            ))}
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12, width:240 }}>
+            {['1','2','3','4','5','6','7','8','9','','0','⌫'].map((d,i)=>(
+              <button key={i} onClick={()=>d==='⌫'?setDigits(x=>x.slice(0,-1)):d?handleDigit(d):null} disabled={!d}
+                style={{ height:64, borderRadius:16, border:'1px solid #FFFFFF12', background:d?'#111827':'transparent', color:d==='⌫'?'#9CA3AF':'#F9FAFB', fontSize:d==='⌫'?20:22, fontWeight:600, cursor:d?'pointer':'default', opacity:d?1:0 }}
+                onMouseEnter={e=>{if(d)e.currentTarget.style.background='#1F2937';}}
+                onMouseLeave={e=>{if(d)e.currentTarget.style.background='#111827';}}
+              >{d}</button>
+            ))}
+          </div>
+          {error&&<div style={{ color:'#F87171', fontSize:13, marginTop:20 }}>Incorrect PIN — try again</div>}
+        </div>
+      );
+    }
+
+    function Root() {
+      const [unlocked, setUnlocked] = useState(!!sessionStorage.getItem(PIN_KEY));
+      return unlocked ? <App /> : <PinScreen onUnlock={()=>setUnlocked(true)} />;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+  </script>
+</body>
+</html>
