@@ -43,6 +43,17 @@
       return { info: await infoRes.json(), sched: await schedRes.json() };
     }
 
+    async function controlHydrawise(apiKey, action, zoneId, duration) {
+      // action: 'run', 'stop', 'suspend', 'resume'
+      let endpoint = '';
+      if (action === 'run')     endpoint = `setzone.php?api_key=${apiKey}&relay_id=${zoneId}&period_id=998&action=run&custom=${duration||600}`;
+      if (action === 'stop')    endpoint = `setzone.php?api_key=${apiKey}&relay_id=${zoneId}&period_id=998&action=stop`;
+      if (action === 'suspend') endpoint = `setschedule.php?api_key=${apiKey}&period_id=998&action=suspend`;
+      if (action === 'resume')  endpoint = `setschedule.php?api_key=${apiKey}&period_id=998&action=resume`;
+      const res = await fetch(`${PROXY_BASE}/hydrawise?api_key=${apiKey}&endpoint=control&path=${encodeURIComponent(endpoint)}`);
+      return res.ok;
+    }
+
     function parseHydrawise({ sched }) {
       const zones = sched.relays || [];
       const running = zones.filter(z => z.timestr === 'Currently Running');
@@ -51,7 +62,7 @@
       zones.forEach(z => { if (z.time && z.time > 0 && z.time < soonest) { soonest = z.time; nextRun = new Date(Date.now() + z.time * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }); } });
       return {
         zoneCount: zones.length,
-        zones: zones.map(z => ({ name: z.name, running: z.timestr === 'Currently Running', nextRun: z.timestr || 'Not scheduled' })),
+        zones: zones.map(z => ({ id: z.relay_id, name: z.name, running: z.timestr === 'Currently Running', nextRun: z.timestr || 'Not scheduled' })),
         running: running.length > 0, runningZone: running[0]?.name || null,
         nextRun, rainDelay,
         status: running.length > 0 ? 'Watering' : rainDelay ? 'Rain delay' : 'Idle',
@@ -183,14 +194,30 @@
                     <button onClick={()=>{ setConnected(false); setApiKey(''); onKeySave(app.id,''); }} style={{ marginLeft:'auto', background:'none', border:'none', color:'#6B7280', fontSize:11, cursor:'pointer' }}>Disconnect</button>
                     <button onClick={onHwRefresh} disabled={hwLoading} style={{ background:'#FFFFFF0A', border:'1px solid #FFFFFF14', borderRadius:6, color:'#9CA3AF', fontSize:11, padding:'3px 8px', cursor:'pointer' }}>{hwLoading?'...':'↻'}</button>
                   </div>
-                  <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:160, overflowY:'auto', marginBottom:10 }}>
+
+                  {/* Suspend / Resume controls */}
+                  <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+                    <button onClick={async()=>{ await controlHydrawise(apiKeys['hydrawise'],'suspend'); onHwRefresh(); }} style={{ flex:1, padding:'8px', borderRadius:8, background:'#F59E0B18', border:'1px solid #F59E0B33', color:'#F59E0B', fontSize:12, fontWeight:600, cursor:'pointer' }}>⏸ Suspend All</button>
+                    <button onClick={async()=>{ await controlHydrawise(apiKeys['hydrawise'],'resume'); onHwRefresh(); }} style={{ flex:1, padding:'8px', borderRadius:8, background:'#34D39918', border:'1px solid #34D39933', color:'#34D399', fontSize:12, fontWeight:600, cursor:'pointer' }}>▶ Resume All</button>
+                  </div>
+
+                  {/* Zone list with controls */}
+                  <div style={{ color:'#6B7280', fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:6 }}>Zones</div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:220, overflowY:'auto', marginBottom:10 }}>
                     {hwLive.zones.map((z,i) => (
-                      <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', background:z.running?'#2DD4BF14':'#FFFFFF06', border:`1px solid ${z.running?'#2DD4BF33':'#FFFFFF0A'}`, borderRadius:7, padding:'6px 10px' }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:7 }}>
-                          <div style={{ width:6, height:6, borderRadius:'50%', background:z.running?'#2DD4BF':'#374151' }} />
-                          <span style={{ color:'#F9FAFB', fontSize:12 }}>{z.name}</span>
+                      <div key={i} style={{ background:z.running?'#2DD4BF14':'#FFFFFF06', border:`1px solid ${z.running?'#2DD4BF33':'#FFFFFF0A'}`, borderRadius:8, padding:'8px 10px' }}>
+                        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 6 }}>
+                          <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+                            <div style={{ width:6, height:6, borderRadius:'50%', background:z.running?'#2DD4BF':'#374151', boxShadow:z.running?'0 0 5px #2DD4BF':'none' }} />
+                            <span style={{ color:'#F9FAFB', fontSize:12, fontWeight:600 }}>{z.name}</span>
+                          </div>
+                          <span style={{ color:z.running?'#2DD4BF':'#6B7280', fontSize:11 }}>{z.running?'💧 Running':z.nextRun}</span>
                         </div>
-                        <span style={{ color:z.running?'#2DD4BF':'#6B7280', fontSize:11 }}>{z.running?'💧 Running':z.nextRun}</span>
+                        <div style={{ display:'flex', gap:6 }}>
+                          <button onClick={async()=>{ await controlHydrawise(apiKeys['hydrawise'],'run',z.id,600); setTimeout(onHwRefresh,1500); }} style={{ flex:1, padding:'5px', borderRadius:6, background:'#2DD4BF18', border:'1px solid #2DD4BF33', color:'#2DD4BF', fontSize:11, fontWeight:600, cursor:'pointer' }}>▶ Run 10 min</button>
+                          <button onClick={async()=>{ await controlHydrawise(apiKeys['hydrawise'],'run',z.id,300); setTimeout(onHwRefresh,1500); }} style={{ flex:1, padding:'5px', borderRadius:6, background:'#2DD4BF10', border:'1px solid #2DD4BF22', color:'#2DD4BF', fontSize:11, fontWeight:600, cursor:'pointer' }}>▶ Run 5 min</button>
+                          {z.running && <button onClick={async()=>{ await controlHydrawise(apiKeys['hydrawise'],'stop',z.id); setTimeout(onHwRefresh,1500); }} style={{ flex:1, padding:'5px', borderRadius:6, background:'#F8717118', border:'1px solid #F8717133', color:'#F87171', fontSize:11, fontWeight:600, cursor:'pointer' }}>⏹ Stop</button>}
+                        </div>
                       </div>
                     ))}
                   </div>
