@@ -76,7 +76,7 @@
       { id:'econet',     name:'EcoNet',      category:'Climate',    icon:'💧', color:'#34D399', bg:'#071A12', description:'Water heater',          url:'https://econetcontrols.com', status:'online', statusLabel:'120°F — Standby',  apiNote:'Enter your API key from econetcontrols.com → Account Settings → API.', quickStats:[{label:'Temp',value:'120°F'},{label:'Mode',value:'Eco'},{label:'Status',value:'Ready'}], visible:true },
       { id:'emporia',    name:'Emporia',     category:'Energy',     icon:'⚡', color:'#A78BFA', bg:'#100820', description:'Energy monitoring',      url:'https://emporiaenergy.com',  status:'online', statusLabel:'3.2 kW in use',    apiNote:'Enter your Vue device local IP address. Requires home network or VPN for remote access.', quickStats:[{label:'Now',value:'3.2 kW'},{label:'Today',value:'18 kWh'},{label:'Cost',value:'$2.40'}], visible:true },
       { id:'simplisafe', name:'SimpliSafe',  category:'Security',   icon:'🔒', color:'#F87171', bg:'#1A0808', description:'Alarm system',          url:'https://simplisafe.com',     status:'armed',  statusLabel:'Armed — Away',     apiNote:'Enter your SimpliSafe API token from your account settings at simplisafe.com.', quickStats:[{label:'Mode',value:'Away'},{label:'Sensors',value:'12 OK'},{label:'Alarm',value:'Off'}], visible:true },
-      { id:'hydrawise',  name:'Hydrawise',   category:'Irrigation', icon:'🌿', color:'#2DD4BF', bg:'#041A18', description:'Smart irrigation',       url:'https://hydrawise.com',      status:'idle',   statusLabel:'Loading...',       apiNote:'Enter your API key from app.hydrawise.com → Account → API. Live zone data loads automatically.', quickStats:[{label:'Zones',value:'—'},{label:'Next Run',value:'—'},{label:'Status',value:'—'}], visible:true },
+      { id:'hydrawise',  name:'Hydrawise',   category:'Irrigation', icon:'🌿', color:'#2DD4BF', bg:'#041A18', description:'Smart irrigation',       url:'https://app.hydrawise.com', appUrl:'hydrawise://',      status:'idle',   statusLabel:'Loading...',       apiNote:'Enter your API key from app.hydrawise.com → Account → API. Live zone data loads automatically.', quickStats:[{label:'Zones',value:'—'},{label:'Next Run',value:'—'},{label:'Status',value:'—'}], visible:true },
     ];
 
     const CAMERAS = [
@@ -141,7 +141,9 @@
             ))}
           </div>
           <div style={{ display:'flex', gap:6 }}>
-            <a href={app.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{ flex:1, textAlign:'center', padding:'7px', borderRadius:7, background:`${app.color}20`, color:app.color, fontSize:11, fontWeight:600, textDecoration:'none', border:`1px solid ${app.color}33` }}>Open ↗</a>
+            <a href={app.url} target="_blank" rel="noopener noreferrer"
+              onClick={e=>{ e.stopPropagation(); if(app.appUrl){ e.preventDefault(); const t=setTimeout(()=>window.open(app.url,'_blank'),1500); window.location=app.appUrl; }}}
+              style={{ flex:1, textAlign:'center', padding:'7px', borderRadius:7, background:`${app.color}20`, color:app.color, fontSize:11, fontWeight:600, textDecoration:'none', border:`1px solid ${app.color}33` }}>Open ↗</a>
             <button onClick={e=>{ e.stopPropagation(); onClick(app); }} style={{ flex:1, padding:'7px', borderRadius:7, background:'#FFFFFF08', color:'#9CA3AF', fontSize:11, fontWeight:600, border:'1px solid #FFFFFF12', cursor:'pointer' }}>Details</button>
           </div>
         </div>
@@ -238,7 +240,9 @@
             </div>
 
             <div style={{ display:'flex', gap:8 }}>
-              <a href={app.url} target="_blank" rel="noopener noreferrer" style={{ flex:1, textAlign:'center', padding:12, borderRadius:10, background:app.color, color:'#000', fontWeight:700, fontSize:13, textDecoration:'none' }}>Open {app.name} ↗</a>
+              <a href={app.url} target="_blank" rel="noopener noreferrer"
+                onClick={e=>{ if(app.appUrl){ e.preventDefault(); setTimeout(()=>window.open(app.url,'_blank'),1500); window.location=app.appUrl; }}}
+                style={{ flex:1, textAlign:'center', padding:12, borderRadius:10, background:app.color, color:'#000', fontWeight:700, fontSize:13, textDecoration:'none' }}>Open {app.name} ↗</a>
               <button onClick={onClose} style={{ padding:'12px 18px', borderRadius:10, background:'#FFFFFF0A', color:'#9CA3AF', fontWeight:600, fontSize:13, border:'1px solid #FFFFFF12', cursor:'pointer' }}>Close</button>
             </div>
           </div>
