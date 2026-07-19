@@ -154,6 +154,7 @@
     function DetailModal({ app, onClose, apiKeys, onKeySave, hwLive, hwError, onHwRefresh, hwLoading }) {
       const [apiKey, setApiKey] = useState(apiKeys[app?.id] || '');
       const [connected, setConnected] = useState(!!apiKeys[app?.id]);
+      useEffect(() => { setApiKey(apiKeys[app?.id] || ''); setConnected(!!apiKeys[app?.id]); }, [app?.id]);
       if (!app) return null;
       const isHW = app.id === 'hydrawise';
 
